@@ -38,7 +38,7 @@ if False:
 
     import requests
     exchange = 'binance-european-options'
-    exchange = 'bitmex'
+    #exchange = 'bitmex'
     resp = requests.get(f"https://api.tardis.dev/v1/exchanges/{exchange}")
     resp.raise_for_status()
     info = resp.json()
@@ -47,6 +47,21 @@ if False:
     print(info['id'])
     print(availableChannels)
     print(availableSymbols)
+    #
+    fr = pu.next_bday(pd.Timestamp('2025-08-01',tz='UTC'))
+    print(f'fr = {fr}')
+    to = fr
+    afr = availableSymbols.availableSince.timestampize()
+    ato = availableSymbols.availableTo.timestampize()
+    print(availableSymbols.loc[(fr>afr) & (ato>to)])
+    currdf = availableSymbols.loc[(fr>afr) & (ato>to)].copy()
+    currdf['maturity'] = currdf.id.str.split('-').apply(lambda x: pd.Timestamp('20'+x[1][:2]+'-'+x[1][2:4]+'-'+x[1][4:]))
+    currdf['undr'] = currdf.id.str.split('-').apply(lambda x: x[0])
+    currdf['strike'] = currdf.id.str.split('-').apply(lambda x: float(x[2]))
+    currdf['pc'] = currdf.id.str.split('-').apply(lambda x: x[3])
+    print(currdf[['undr','maturity']].drop_duplicates().set_index(['maturity','undr'],drop=False).sort_index().unstack('undr').undr.fillna(0))
+    btc_symbols = currdf.loc[currdf.undr=='BTC', 'id']
+    
     
 if False:
     #
@@ -65,19 +80,26 @@ if False:
             exchange="binance-european-options",
             from_date="2025-08-01",
             to_date="2025-08-02",
-            filters=[Channel(name="trade", symbols=["XBTUSD","ETHUSD"]), Channel("orderBookL2", ["XBTUSD"])],
+            #filters=[Channel(name="trade", symbols=["XBTUSD","ETHUSD"]), Channel("orderBookL2", ["XBTUSD"])],
+            #filters=[Channel(name="depth100", symbols=btc_symbols.to_list())]
+            # ['trade', 'depth100', 'index', 'markPrice', 'ticker', 'openInterest']
+            filters=[Channel(name="openInterest", symbols=[])]
         )
         #
         # this will print all trades and orderBookL2 messages for XBTUSD
         # and all trades for ETHUSD for bitmex exchange
         # between 2019-06-01T00:00:00.000Z and 2019-06-02T00:00:00.000Z (whole first day of June 2019)
+        count = 0
         async for local_timestamp, message in messages:
             # local timestamp is a Python datetime that marks timestamp when given message has been received
             # message is a message object as provided by exchange real-time stream
-            #print(message)
-            print(pd.Timestamp(local_timestamp))
+            print(message)
+            #print(pd.Timestamp(local_timestamp))
+            count = count+1
+            if count > 10 : break
     #
-    asyncio.run(replay())
+    #asyncio.run(replay())
+    #await replay()
     
 if False:
     from tardis_dev import datasets
