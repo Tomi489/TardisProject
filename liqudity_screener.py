@@ -29,7 +29,76 @@ def parse_expiry(expiry_str):
     except: return None
     return None
 
-def run_robust_sample(limit=10):
+def liquidity_screener(df, symbol):
+    if df.empty:
+        return None
+
+    # Oszlopnevek normalizálása (Tardis néha 'amount'-ot használ 'size' helyett)
+    qty_col = 'amount' if 'amount' in df.columns else 'size'
+    ts_col = 'timestamp' if 'timestamp' in df.columns else 'local_timestamp'
+
+    # Alapvető számítások
+    total_trades = len(df)
+    total_volume = df[qty_col].sum()
+    avg_trade_size = df[qty_col].mean()
+    median_trade_size = df[qty_col].median()
+    
+    # Időbeli adatok (Tardis timestamp nanoszekundumban vagy mikroszekundumban van)
+    df['dt'] = pd.to_datetime(df[ts_col], unit='us') # vagy 'ns' az exchangetől függően
+    time_span_minutes = (df['dt'].max() - df['dt'].min()).total_seconds() / 60
+    
+    # Hány különböző percben volt kereskedés? (0-60-ig egy órás mintánál)
+    active_minutes = df['dt'].dt.minute.nunique()
+    
+    # Árfolyam tartomány (Proxy a slippage-re)
+    price_range = (df['price'].max() - df['price'].min()) / df['price'].mean() if total_trades > 1 else 0
+
+    # Eredmények összegyűjtése egy szótárba
+    stats = {
+        "symbol": symbol,
+        "total_trades": total_trades,
+        "total_volume": round(total_volume, 4),
+        "avg_trade_size": round(avg_trade_size, 4),
+        "median_trade_size": round(median_trade_size, 4),
+        "trades_per_minute": round(total_trades / time_span_minutes, 2) if time_span_minutes > 0 else 0,
+        "active_minutes_per_hour": active_minutes,
+        "relative_price_range": round(price_range, 6)
+    }
+
+    return stats
+
+def get_working_days_list(opt, benchmark_str="2025-12-01", today=datetime(2026, 1, 3)):
+    expiry_str = opt['metadata'].get('expiry')
+    expiry_dt = parse_expiry(expiry_str)
+    target_dates = []
+
+    # 1. ESET: AKTÍV opció vagy hiányzó lejárat (Benchmark hét munkanapjai)
+    if not expiry_dt or expiry_dt >= today:
+        # Dec 1, 2025 hétfőre esik. Vegyük azt a hetet (H-P).
+        base_date = datetime.strptime(benchmark_str, "%Y-%m-%d")
+        # Megkeressük a hét hétfőjét, ha nem pont hétfőt adtál meg:
+        start_of_week = base_date - timedelta(days=base_date.weekday())
+        
+        for i in range(5):
+            day = start_of_week + timedelta(days=i)
+            target_dates.append(day.strftime("%Y-%m-%d"))
+
+    # 2. ESET: LEJÁRT opció (Lejárat előtti utolsó 5 munkanap)
+    else:
+        # Elindulunk a lejárat előtti naptól visszafelé
+        current_day = expiry_dt - timedelta(days=1)
+        while len(target_dates) < 5:
+            # 0=Hétfő, 4=Péntek (tehát < 5 jelent munkanapot)
+            if current_day.weekday() < 5:
+                target_dates.append(current_day.strftime("%Y-%m-%d"))
+            current_day -= timedelta(days=1)
+        
+        # Visszaállítjuk időrendi sorrendbe (opcionális)
+        target_dates.reverse()
+
+    return target_dates
+
+def run_robust_sample(limit=3):
     if not API_KEY:
         print("❌ Error: TARDIS_API_KEY not found in .env file.")
         return
@@ -58,48 +127,47 @@ def run_robust_sample(limit=10):
         api_exchange = "okex-options" if exchange == "okx" else exchange
         
         # Determine target date
-        expiry_dt = parse_expiry(opt['metadata'].get('expiry'))
-        target_date = benchmark_date if not expiry_dt or expiry_dt >= today else (expiry_dt - timedelta(days=7)).strftime("%Y-%m-%d")
-        year, month, day = target_date.split('-')
+        target_dates = get_working_days_list(opt, benchmark_str=benchmark_date, today=today)
         
-        # URL Encode the symbol (Essential for symbols like BTC_USDC or symbols with slashes)
-        encoded_symbol = urllib.parse.quote(symbol, safe='')
-        url = f"https://datasets.tardis.dev/v1/{api_exchange}/trades/{year}/{month}/{day}/{encoded_symbol}.csv.gz"
+        for target_date in target_dates:
+            year, month, day = target_date.split("-")
+            
+            # URL Encode the symbol (Essential for symbols like BTC_USDC or symbols with slashes)
+            encoded_symbol = urllib.parse.quote(symbol, safe='')
+            url = f"https://datasets.tardis.dev/v1/{api_exchange}/trades/{year}/{month}/{day}/{encoded_symbol}.csv.gz"
         
-        print(f"[{processed_count + 1}] Requesting: {exchange} | {symbol} | Date: {target_date}")
-
-        try:
-            # Small sleep to prevent DNS flooding
-            time.sleep(0.5)
+            print(f"[{processed_count + 1}] Requesting: {exchange} | {symbol} | Date: {target_date}")
+            try:
+                # Small sleep to prevent DNS flooding
+                time.sleep(0.5)
             
-            response = session.get(url, headers=headers, stream=True, timeout=10)
+                response = session.get(url, headers=headers, stream=True, timeout=10)
             
-            if response.status_code == 200:
-                with gzip.GzipFile(fileobj=response.raw) as gz:
-                    df = pd.read_csv(gz)
-                    print(f"✅ SUCCESS: {symbol} has {len(df)} trades.")
+                if response.status_code == 200:
+                    with gzip.GzipFile(fileobj=response.raw) as gz:
+                        df = pd.read_csv(gz)
+                        print(f"✅ SUCCESS: {symbol} has {len(df)} trades.")
                     
-                    # SHOW HEAD OF DATASET
-                    if not df.empty:
-                        print("\n--- DATA PREVIEW ---")
-                        print(df.head(3).to_string())
-                        print("-" * 30 + "\n")
-                    else:
-                        print("ℹ️ File was empty (Header only).")
+                        # SHOW HEAD OF DATASET
+                        if not df.empty:
+                            print("\n--- DATA PREVIEW ---")
+                            print(df.head(3).to_string())
+                            print("-" * 30 + "\n")
+                        else:
+                            print("ℹ️ File was empty (Header only).")
                         
-            elif response.status_code == 404:
-                print(f"ℹ️ 404: No trades occurred for {symbol} on this date.\n")
-            elif response.status_code == 401:
-                print(f"❌ 401: Unauthorized. Check API Key.\n")
-            else:
-                print(f"⚠️ Unexpected Status {response.status_code} for {symbol}\n")
+                elif response.status_code == 404:
+                    print(f"ℹ️ 404: No trades occurred for {symbol} on this date.\n")
+                elif response.status_code == 401:
+                    print(f"❌ 401: Unauthorized. Check API Key.\n")
+                else:
+                    print(f"⚠️ Unexpected Status {response.status_code} for {symbol}\n")
+                processed_count += 1
 
-            processed_count += 1
-
-        except Exception as e:
-            print(f"🔥 Network/Parsing Error for {symbol}: {e}\n")
-            # If we hit a network error, wait longer before next try
-            time.sleep(2)
+            except Exception as e:
+                print(f"🔥 Network/Parsing Error for {symbol}: {e}\n")
+                # If we hit a network error, wait longer before next try
+                time.sleep(2)
 
     print("-" * 50)
     print(f"Sampler finished. Processed {processed_count} attempts.")
