@@ -118,6 +118,8 @@ def run_robust_sample(limit=3):
     today = datetime(2025, 12, 30)
     benchmark_date = "2025-12-01"
 
+    liquidity_stats = []
+
     for opt in target_options:
         if processed_count >= limit:
             break
@@ -147,6 +149,22 @@ def run_robust_sample(limit=3):
                     with gzip.GzipFile(fileobj=response.raw) as gz:
                         df = pd.read_csv(gz)
                         print(f"✅ SUCCESS: {symbol} has {len(df)} trades.")
+                        # RUN LIQUIDITY SCREENER
+                        stats = liquidity_screener(df, symbol)
+                        if stats:
+                            print("---- LIQUIDITY STATS ----")
+                            for k, v in stats.items():
+                                print(f"{k}: {v}")
+
+                        liquidity_stats.append(stats)
+
+                        #add target date range to stats
+                        if stats:
+                            stats['target_date'] = target_date
+
+                        #add exchange to stats
+                        if stats:
+                            stats['exchange'] = exchange
                     
                         # SHOW HEAD OF DATASET
                         if not df.empty:
@@ -172,5 +190,11 @@ def run_robust_sample(limit=3):
     print("-" * 50)
     print(f"Sampler finished. Processed {processed_count} attempts.")
 
+    #output liquidity stats to csv
+    if liquidity_stats:
+        stats_df = pd.DataFrame(liquidity_stats)
+        stats_df.to_csv("liquidity_stats_output.csv", index=False)
+        print("Liquidity stats saved to liquidity_stats_output.csv")
+
 if __name__ == "__main__":
-    run_robust_sample(limit=10)
+    run_robust_sample(limit=10000000)  # Set a high limit to process all available options
